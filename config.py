@@ -1,5 +1,6 @@
 from dataclasses import dataclass,asdict
 from pathlib import Path
+from typing import Optional
 import torch
 
 @dataclass
@@ -22,7 +23,6 @@ class Config:
     num_reference:int=3  # 每个样本使用的参考图数量
     temperature:float=0.35  # 初始参考选择温度
     min_temperature:float=0.08  # 温度衰减下限
-    group_update_interval:int=5  # 每隔多少个 epoch 更新一次分组（第 1 个 epoch 也会更新）
     lambda_ssim:float=0.2  # SSIM 损失项权重
     residual_weight:float=0.001  # 残差正则项权重
     num_workers:int=2  # 数据加载工作进程数
@@ -33,7 +33,11 @@ class Config:
     download_url:str=""  # 数据集下载地址（为空时不下载）
     max_visualizations:int=12  # 单次最多保存的预览图数
     visualize_val_each_epoch:bool=True  # 是否每个 epoch 保存验证集预览图
-    reference_pool_size:int=128  # 候选参考图池大小
+    # 记录按 discover_records 的稳定排序编号（从 1 开始、包含端点）。None 时沿用随机比例划分。
+    train_start:Optional[int]=1
+    train_end:Optional[int]=100
+    val_start:Optional[int]=101
+    val_end:Optional[int]=110
     def paths(self):
         root=Path(self.output_dir);return {"root":root,"checkpoints":root/"checkpoints","similarity":root/"similarity","logs":root/"logs","visuals":root/"visuals"}
     def to_dict(self):return asdict(self)

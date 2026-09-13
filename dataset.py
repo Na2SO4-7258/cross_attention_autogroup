@@ -1,4 +1,4 @@
-import re
+import json,re
 from pathlib import Path
 import numpy as np
 from PIL import Image,ImageOps
@@ -35,14 +35,27 @@ def discover_records(data_dir):
     if not records:raise RuntimeError(f"No matched Original/Expert pairs found in {data_dir}.")
     return sorted(records,key=lambda item:item["id"])
 
-def make_splits(records,output_dir,seed,ratios):
+def make_splits(records,output_dir,seed,ratios,train_range=None,val_range=None):
     split_path=Path(output_dir)/"splits.json";ids=[r["id"] for r in records]
+    if (train_range is None)!=(val_range is None):
+        raise ValueError("train_range and val_range must be specified together")
+    if train_range is not None:
+        def selected(sample_range,name):
+            start,end=sample_range
+            if start is None or end is None or start<1 or end<start or end>len(ids):
+                raise ValueError(f"Invalid {name} sample range {sample_range}; valid 1-based range is 1..{len(ids)}")
+            return ids[start-1:end]
+        train_ids=selected(train_range,"training")
+        val_ids=selected(val_range,"validation")
+        if set(train_ids)&set(val_ids):
+            raise ValueError("Training and validation sample ranges must not overlap")
+        # 未指定的样本保留作测试集；按组对（而非原图）编号划分。
+        result={"train":train_ids,"val":val_ids,"test":[x for x in ids if x not in set(train_ids)|set(val_ids)]}
+        split_path.parent.mkdir(parents=True,exist_ok=True);split_path.write_text(json.dumps(result,indent=2),encoding="utf-8");return result
     if split_path.exists():
-        import json
         saved=json.loads(split_path.read_text(encoding="utf-8"))
         if set().union(*map(set,saved.values()))==set(ids):return saved
     rng=np.random.default_rng(seed);order=rng.permutation(ids).tolist();n=len(order);n_train=int(n*ratios[0]);n_val=int(n*ratios[1]);result={"train":order[:n_train],"val":order[n_train:n_train+n_val],"test":order[n_train+n_val:]}
-    import json
     split_path.parent.mkdir(parents=True,exist_ok=True);split_path.write_text(json.dumps(result,indent=2),encoding="utf-8");return result
 
 class FiveKDataset(Dataset):
