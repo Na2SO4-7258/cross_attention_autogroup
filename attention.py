@@ -1,4 +1,3 @@
-import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -17,6 +16,3 @@ class ReferenceSimilarity(nn.Module):
 
 class DynamicReferenceSelector(nn.Module):
     def forward(self,scores,temperature):return F.softmax(scores/temperature,dim=-1)
-
-class EditTransfer(nn.Module):
-    def forward(self,attention,edit_tokens):return attention@edit_tokens

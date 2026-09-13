@@ -32,11 +32,11 @@ class Trainer:
             refs_o.append(np.stack([x[0] for x in rows]));refs_e.append(np.stack([x[1] for x in rows]))
         return torch.from_numpy(np.stack(refs_o)).to(self.device),torch.from_numpy(np.stack(refs_e)).to(self.device)
     def run_epoch(self,dataset,split,epoch,mode,train):
-        dataset.set_epoch(epoch);self.model.train(train);values=[];psnrs=[];ssims=[]
+        self.model.train(train);values=[];psnrs=[];ssims=[]
         for batch in tqdm(self.loader(dataset,train),desc=f"{split} {epoch}",leave=False):
             original=batch["original"].to(self.device);target=batch["expert"].to(self.device);refs_o,refs_e=self._references(batch["index"].tolist(),split,mode)
             with torch.set_grad_enabled(train):
-                output,_,_=self.model(original,refs_o,refs_e,self.temperature);l1=F.l1_loss(output,target);ssim=ssim_per_image(output,target).mean();loss=l1+self.cfg.lambda_ssim*(1-ssim)+self.cfg.residual_weight*(output-original).abs().mean()
+                output,_,_=self.model(original,target,refs_o,refs_e,self.temperature);l1=F.l1_loss(output,target);ssim=ssim_per_image(output,target).mean();loss=l1+self.cfg.lambda_ssim*(1-ssim)+self.cfg.residual_weight*(output-original).abs().mean()
                 if train:self.optimizer.zero_grad(set_to_none=True);loss.backward();torch.nn.utils.clip_grad_norm_(self.model.parameters(),1.0);self.optimizer.step()
             values.append(loss.item());psnrs.extend(psnr_per_image(output.detach(),target).cpu().tolist());ssims.extend(ssim_per_image(output.detach(),target).cpu().tolist())
         return {"loss":float(np.mean(values)),"psnr":float(np.mean(psnrs)),"ssim":float(np.mean(ssims))}
@@ -44,11 +44,16 @@ class Trainer:
     def update_grouping(self,epoch):
         self.model.eval();pool=self.pool;ids=[self.train_set.records[i]["id"] for i in pool];n=len(pool);matrix=np.full((n,n),-np.inf,dtype=np.float32)
         for i,idx in enumerate(tqdm(pool,desc="similarity",leave=False)):
-            current=torch.from_numpy(self.train_set.load(idx)[0][None]).to(self.device)
+            current_original,current_expert=self.train_set.load(idx)[:2]
+            current_original=torch.from_numpy(current_original[None]).to(self.device)
+            current_expert=torch.from_numpy(current_expert[None]).to(self.device)
             for start in range(0,n,self.cfg.batch_size):
                 subset=pool[start:start+self.cfg.batch_size];rows=[self.train_set.load(j)[:2] for j in subset]
                 ro=torch.from_numpy(np.stack([r[0] for r in rows])).to(self.device);re=torch.from_numpy(np.stack([r[1] for r in rows])).to(self.device)
-                current_rep=current.expand(len(subset),-1,-1,-1);_,_,scores=self.model.pair(current_rep,ro,re);matrix[i,start:start+len(subset)]=scores.cpu().numpy()
+                current_o=current_original.expand(len(subset),-1,-1,-1)
+                current_e=current_expert.expand(len(subset),-1,-1,-1)
+                scores=self.model.retouch_similarity_pair(current_o,current_e,ro,re)
+                matrix[i,start:start+len(subset)]=scores.cpu().numpy()
             matrix[i,i]=-np.inf
         payload=top_reference_payload(ids,matrix,self.cfg.num_reference);previous=self.last_top;self.last_top=payload
         lookup={image_id:index for index,image_id in enumerate(ids)};self.references={}
