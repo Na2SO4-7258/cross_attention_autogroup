@@ -7,11 +7,11 @@ from download_fivek import ensure_fivek
 from dataset import discover_records,make_splits,FiveKDataset
 from models import LatentRetouchModel
 from trainer import Trainer
-from evaluator import evaluate
+from evaluator import evaluate,save_visualizations
 
 def arguments():
     parser=argparse.ArgumentParser(description="Latent reference learning for MIT-Adobe FiveK retouching")
-    parser.add_argument("--data-dir");parser.add_argument("--output-dir");parser.add_argument("--download-url");parser.add_argument("--epochs",type=int);parser.add_argument("--batch-size",type=int);parser.add_argument("--image-size",type=int);parser.add_argument("--mode",choices=["self_reference","random_reference","fixed_reference","dynamic_attention"],default="dynamic_attention");parser.add_argument("--reference-pool-size",type=int);parser.add_argument("--num-reference",type=int);parser.add_argument("--num-workers",type=int);parser.add_argument("--group-update-interval",type=int);parser.add_argument("--feature-dim",type=int);parser.add_argument("--attention-dim",type=int);parser.add_argument("--edit-dim",type=int);parser.add_argument("--cross-attention-heads",type=int);parser.add_argument("--attention-spatial-size",type=int);parser.add_argument("--resume");parser.add_argument("--evaluate-only",action="store_true")
+    parser.add_argument("--data-dir");parser.add_argument("--output-dir");parser.add_argument("--download-url");parser.add_argument("--epochs",type=int);parser.add_argument("--batch-size",type=int);parser.add_argument("--image-size",type=int);parser.add_argument("--mode",choices=["self_reference","random_reference","fixed_reference","dynamic_attention"],default="dynamic_attention");parser.add_argument("--reference-pool-size",type=int);parser.add_argument("--num-reference",type=int);parser.add_argument("--num-workers",type=int);parser.add_argument("--group-update-interval",type=int);parser.add_argument("--feature-dim",type=int);parser.add_argument("--attention-dim",type=int);parser.add_argument("--edit-dim",type=int);parser.add_argument("--cross-attention-heads",type=int);parser.add_argument("--attention-spatial-size",type=int);parser.add_argument("--resume");parser.add_argument("--evaluate-only",action="store_true");parser.add_argument("--visualize-val-each-epoch",action="store_true",help="save all validation panels after every epoch")
     return parser.parse_args()
 
 def main():
@@ -34,6 +34,7 @@ def main():
     for epoch in range(start,cfg.num_epochs+1):
         trainer.temperature=max(cfg.min_temperature,cfg.temperature*(1-(epoch-1)/max(cfg.num_epochs,1)))
         train_metrics=trainer.run_epoch(train,"train",epoch,args.mode,True);val_metrics=trainer.run_epoch(val,"val",epoch,args.mode,False);row={"epoch":epoch,"temperature":trainer.temperature,"train":train_metrics,"val":val_metrics};
+        if cfg.visualize_val_each_epoch:save_visualizations(model,val,trainer,args.mode,f"val_epoch_{epoch:03d}")
         if args.mode=="dynamic_attention" and (epoch==1 or epoch%cfg.group_update_interval==0):
             group=trainer.update_grouping(epoch);row["grouping"]=group;trainer.checkpoint(epoch,best,f"epoch_{epoch:03d}.pt")
         if val_metrics["psnr"]>best:best=val_metrics["psnr"];trainer.checkpoint(epoch,best,"best_psnr.pt")

@@ -33,6 +33,7 @@ class Config:
     val_ratio:float=0.1  # 验证集占全部样本的比例；其余为测试集。
     download_url:str=""  # 可选的自定义数据下载地址；留空使用内置下载器。
     max_visualizations:int=12  # 评估时最多保存的对比图数量。
+    visualize_val_each_epoch:bool=False  # 是否每个 epoch 输出整套验证集可视化图片。
     reference_pool_size:int=512  # 动态分组时纳入相似度计算的训练样本池大小。
     def paths(self):
         root=Path(self.output_dir)
