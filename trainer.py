@@ -56,27 +56,27 @@ class Trainer:
         """Choose references for every pair; candidates may come from another split."""
         candidate_dataset=dataset if candidate_dataset is None else candidate_dataset;candidate_split=split if candidate_split is None else candidate_split
         if not len(candidate_dataset):raise RuntimeError(f"{candidate_split} has no reference pairs")
-        self.model.eval();indices=list(range(len(dataset)));candidate_indices=list(range(len(candidate_dataset)));ids=[dataset.records[i]["id"] for i in indices];candidate_ids=[candidate_dataset.records[i]["id"] for i in candidate_indices];n=len(indices);matrix=np.full((n,len(candidate_indices)),-np.inf,dtype=np.float32)
-        for i,idx in enumerate(tqdm(indices,desc=f"{split} similarity",leave=False)):
-            current_original,current_expert=dataset.load(idx)[:2]
-            current_original=torch.from_numpy(current_original[None]).to(self.device)
-            current_expert=torch.from_numpy(current_expert[None]).to(self.device)
-            for start in range(0,len(candidate_indices),self.cfg.batch_size):
-                subset=candidate_indices[start:start+self.cfg.batch_size];rows=[candidate_dataset.load(j)[:2] for j in subset]
-                ro=torch.from_numpy(np.stack([r[0] for r in rows])).to(self.device);re=torch.from_numpy(np.stack([r[1] for r in rows])).to(self.device)
-                current_o=current_original.expand(len(subset),-1,-1,-1)
-                current_e=current_expert.expand(len(subset),-1,-1,-1)
-                scores=self.model.retouch_similarity_pair(current_o,current_e,ro,re)
-                matrix[i,start:start+len(subset)]=scores.cpu().numpy()
-            # 一个原图的 A–E 专家组对不能互相作为参考，只能参考另一张原图的组对。
+        self.model.eval();indices=list(range(len(dataset)));candidate_indices=list(range(len(candidate_dataset)));ids=[dataset.records[i]["id"] for i in indices];candidate_ids=[candidate_dataset.records[i]["id"] for i in candidate_indices]
+        def embeddings(source,source_indices,label):
+            vectors=[]
+            for start in tqdm(range(0,len(source_indices),self.cfg.batch_size),desc=f"{label} embedding",leave=False):
+                subset=source_indices[start:start+self.cfg.batch_size];rows=[source.load(j)[:2] for j in subset]
+                original=torch.from_numpy(np.stack([row[0] for row in rows])).to(self.device);expert=torch.from_numpy(np.stack([row[1] for row in rows])).to(self.device)
+                vectors.append(self.model.grouping_embedding(original,expert))
+            return torch.cat(vectors).cpu().numpy()
+        query_vectors=embeddings(dataset,indices,split)
+        candidate_vectors=query_vectors if dataset is candidate_dataset else embeddings(candidate_dataset,candidate_indices,f"{candidate_split} reference")
+        # 每个组对均由原有 9 通道编码器的逐通道全局平均池化向量表示；欧氏距离越小，参考越相近。
+        matrix=np.linalg.norm(query_vectors[:,None,:]-candidate_vectors[None,:,:],axis=2).astype(np.float32)
+        for i,idx in enumerate(indices):
             current_source=self._source_id(dataset,idx)
             for candidate_pos,candidate_idx in enumerate(candidate_indices):
-                if self._source_id(candidate_dataset,candidate_idx)==current_source:matrix[i,candidate_pos]=-np.inf
-        payload={image_id:[[candidate_ids[j],float(matrix[i,j])] for j in np.argsort(-matrix[i]) if np.isfinite(matrix[i,j])][:self.cfg.num_reference] for i,image_id in enumerate(ids)};previous=self.last_top[split];self.last_top[split]=payload
+                if self._source_id(candidate_dataset,candidate_idx)==current_source:matrix[i,candidate_pos]=np.inf
+        payload={image_id:[[candidate_ids[j],float(matrix[i,j])] for j in np.argsort(matrix[i]) if np.isfinite(matrix[i,j])][:self.cfg.num_reference] for i,image_id in enumerate(ids)};previous=self.last_top[split];self.last_top[split]=payload
         lookup={image_id:index for index,image_id in enumerate(candidate_ids)};self.references[split]={};self.reference_sources[split]=candidate_split
         for source_idx,record in enumerate(dataset.records):
             self.references[split][source_idx]=[lookup[v[0]] for v in payload[record["id"]]]
         np.save(Path(self.cfg.paths()["similarity"])/f"{split}_similarity_epoch_{epoch:03d}.npy",matrix);save_json(Path(self.cfg.paths()["similarity"])/f"{split}_top_reference_epoch_{epoch:03d}.json",payload)
-        stability=grouping_stability(previous,payload);info={"average_similarity":float(matrix[np.isfinite(matrix)].mean()),"grouping_stability":stability,"example":next(iter(payload.items()))};save_json(Path(self.cfg.paths()["similarity"])/f"{split}_grouping_epoch_{epoch:03d}.json",info);return info
+        stability=grouping_stability(previous,payload);info={"average_distance":float(matrix[np.isfinite(matrix)].mean()),"grouping_stability":stability,"example":next(iter(payload.items()))};save_json(Path(self.cfg.paths()["similarity"])/f"{split}_grouping_epoch_{epoch:03d}.json",info);return info
     def checkpoint(self,epoch,best,tag):
         state={"model_state":self.model.state_dict(),"optimizer_state":self.optimizer.state_dict(),"epoch":epoch,"best_psnr":best,"temperature":self.temperature,"references":self.references,"reference_sources":self.reference_sources,"config":self.cfg.to_dict()};torch.save(state,Path(self.cfg.paths()["checkpoints"])/tag)

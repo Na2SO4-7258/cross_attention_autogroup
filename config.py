@@ -36,9 +36,9 @@ class Config:
     visualize_val_each_epoch:bool=True  # 是否每个 epoch 保存验证集预览图
     # 原图按 discover_records 的稳定排序编号（从 1 开始、包含端点）；每张原图的全部专家组对都会被纳入。None 时沿用随机比例划分。
     train_start:Optional[int]=1
-    train_end:Optional[int]=100
-    val_start:Optional[int]=101
-    val_end:Optional[int]=110
+    train_end:Optional[int]=230
+    val_start:Optional[int]=231
+    val_end:Optional[int]=260
     def paths(self):
         root=Path(self.output_dir);return {"root":root,"checkpoints":root/"checkpoints","similarity":root/"similarity","logs":root/"logs","visuals":root/"visuals"}
     def to_dict(self):return asdict(self)

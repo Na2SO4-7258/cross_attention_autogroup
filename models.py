@@ -26,6 +26,9 @@ class LatentRetouchModel(nn.Module):
     def tokens(feature):return feature.flatten(2).transpose(1,2)
     def resize(self,feature):return F.interpolate(feature,size=(self.attention_spatial_size,self.attention_spatial_size),mode="bilinear",align_corners=False)
     def edit_features(self,original,expert):return self.resize(self.b(torch.cat([original,expert,expert-original],1)))
+    def grouping_embedding(self,original,expert):
+        """One [1, n] descriptor per (original, expert) pair from the existing 9-channel encoder."""
+        return self.b(torch.cat([original,expert,expert-original],1)).mean(dim=(2,3))
     def retouch_similarity_pair(self,current,current_expert,ref_original,ref_expert):
         _,attention=self.cross_attention(self.tokens(self.edit_features(current,current_expert)),self.tokens(self.edit_features(ref_original,ref_expert)));return self.similarity(attention)
     def transfer_pair(self,current,reference_edit):
