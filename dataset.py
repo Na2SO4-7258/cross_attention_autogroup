@@ -40,16 +40,23 @@ def make_splits(records,output_dir,seed,ratios,train_range=None,val_range=None):
     if (train_range is None)!=(val_range is None):
         raise ValueError("train_range and val_range must be specified together")
     if train_range is not None:
+        # 范围以“原图编号”计数；实际划分仍由完整的 (original, expert) 组对组成。
+        source_ids=[]
+        for record in records:
+            source_id=record["id"].rsplit("_",1)[0]
+            if not source_ids or source_ids[-1]!=source_id:source_ids.append(source_id)
         def selected(sample_range,name):
             start,end=sample_range
-            if start is None or end is None or start<1 or end<start or end>len(ids):
-                raise ValueError(f"Invalid {name} sample range {sample_range}; valid 1-based range is 1..{len(ids)}")
-            return ids[start-1:end]
-        train_ids=selected(train_range,"training")
-        val_ids=selected(val_range,"validation")
+            if start is None or end is None or start<1 or end<start or end>len(source_ids):
+                raise ValueError(f"Invalid {name} original-image range {sample_range}; valid 1-based range is 1..{len(source_ids)}")
+            return set(source_ids[start-1:end])
+        train_sources=selected(train_range,"training")
+        val_sources=selected(val_range,"validation")
+        train_ids=[r["id"] for r in records if r["id"].rsplit("_",1)[0] in train_sources]
+        val_ids=[r["id"] for r in records if r["id"].rsplit("_",1)[0] in val_sources]
         if set(train_ids)&set(val_ids):
             raise ValueError("Training and validation sample ranges must not overlap")
-        # 未指定的样本保留作测试集；按组对（而非原图）编号划分。
+        # 未指定的原图及其全部专家组对保留作测试集。
         result={"train":train_ids,"val":val_ids,"test":[x for x in ids if x not in set(train_ids)|set(val_ids)]}
         split_path.parent.mkdir(parents=True,exist_ok=True);split_path.write_text(json.dumps(result,indent=2),encoding="utf-8");return result
     if split_path.exists():

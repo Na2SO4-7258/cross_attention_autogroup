@@ -29,7 +29,10 @@ def save_visualizations(model,dataset,trainer,mode,name,max_images=None,split="v
 @torch.no_grad()
 def evaluate(model,dataset,trainer,mode,name):
     model.eval();metrics=[];visual_dir=Path(trainer.cfg.paths()["visuals"])/name;visual_dir.mkdir(parents=True,exist_ok=True)
-    if mode=="dynamic_attention":trainer.update_grouping(dataset,name,0)
+    if mode=="dynamic_attention":
+        # 测试样本只作为查询；参考候选始终来自完整训练集。
+        if name=="test":trainer.update_grouping(dataset,name,0,trainer.train_set,"train")
+        else:trainer.update_grouping(dataset,name,0)
     for index in range(len(dataset)):
         original,expert,image_id=dataset.load(index);o=torch.from_numpy(original[None]).to(trainer.device);t=torch.from_numpy(expert[None]).to(trainer.device)
         if mode=="self_reference":
