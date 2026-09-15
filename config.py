@@ -20,9 +20,9 @@ class Config:
     attention_spatial_size:int=32  # 注意力特征图空间尺寸
     enhancer_base_dim:int=64  # 增强器基础通道数
     enhancer_mid_dim:int=96  # 增强器中间通道数
-    num_reference:int=3  # 每个样本使用的参考图数量
-    temperature:float=0.35  # 初始参考选择温度
-    min_temperature:float=0.08  # 温度衰减下限
+    num_reference:int=2  # 每个样本使用的参考图数量
+    temperature:float=0.01  # 初始参考选择温度
+    min_temperature:float=0.01  # 温度衰减下限
     group_update_interval:int=4  # 每隔多少个 epoch 对全部训练组对重新检索参考（第 1 个 epoch 也会检索）
     lambda_ssim:float=0  # SSIM 损失项权重
     residual_weight:float=0.001  # 残差正则项权重
@@ -36,9 +36,9 @@ class Config:
     visualize_val_each_epoch:bool=True  # 是否每个 epoch 保存验证集预览图
     # 原图按 discover_records 的稳定排序编号（从 1 开始、包含端点）；每张原图的全部专家组对都会被纳入。None 时沿用随机比例划分。
     train_start:Optional[int]=1
-    train_end:Optional[int]=230
-    val_start:Optional[int]=231
-    val_end:Optional[int]=260
+    train_end:Optional[int]=700
+    val_start:Optional[int]=701
+    val_end:Optional[int]=750
     def paths(self):
         root=Path(self.output_dir);return {"root":root,"checkpoints":root/"checkpoints","similarity":root/"similarity","logs":root/"logs","visuals":root/"visuals"}
     def to_dict(self):return asdict(self)

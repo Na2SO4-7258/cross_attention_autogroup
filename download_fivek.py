@@ -1,6 +1,6 @@
 """MIT-Adobe FiveK retrieval and local compact-RGB preparation."""
 DOWNLOAD_MAX_SIDE=500
-DOWNLOAD_UP_TO=300
+DOWNLOAD_UP_TO=500
 DOWNLOAD_WORKERS=8
 MANIFEST_URLS=(
     "https://huggingface.co/datasets/yuukicammy/MIT-Adobe-FiveK/resolve/main/training.json",

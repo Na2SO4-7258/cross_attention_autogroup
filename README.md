@@ -1,20 +1,38 @@
-# Latent FiveK Retouching
+dyNAmic Transfer Touch
 
-End-to-end PyTorch implementation of spatial cross-attention reference selection and edit transfer for MIT-Adobe FiveK. It does not use expert identity as a grouping label, KMeans, diffusion, or reinforcement learning. The downloader retrieves public FiveK manifests and source images, then converts them to compact RGB PNG files in `0001` through `5000` directories. Set `DOWNLOAD_MAX_SIDE` (edge size) and `DOWNLOAD_UP_TO` (last image number) at the top of `download_fivek.py`; they default to `500` and `5000`.
+在本模型中，所有专家编号不再拥有含义，数据的最小单位是(原图，专家图)对，也就是说原本 FiveK 的一组样本（1 原图 5 专家图）被转化为 5 个 (原图，专家图) 对。
 
-```powershell
-python -m pip install -r requirements.txt
-python main.py --data-dir data/fivek --epochs 30 --mode dynamic_attention
-```
+核心思路在于动态寻找参考图对，给每个(当前图，答案图)对动态地寻找最佳的(参考图，参考专家图)对，不经过任何显式的方式寻找（例如按相同语义分区做相同处理），而是让网络在每次训练中不断选取新的参考图来寻找最佳参考图，并通过交叉注意力机制对齐两图中应该有相似处理的部分，而非依赖语义或位置等显式信息。
 
-The loader discovers common `original`/`input` and `expert_A`...`expert_E`/`tiff16_a`...`tiff16_e` layouts, decodes TIFF/JPEG/PNG and uses `rawpy` for DNG. The atomic sample is an `(original, expert)` pair: each pair independently selects a `(reference original, reference expert)` pair from a different original image. In `dynamic_attention` mode, at the start of every epoch, cross-attention scores every pair against valid pairs in the same split, then training starts. Validation and test selection are likewise made only within their own split; there is no truncated reference pool or random fallback.
+分组阶段（变化信息向量）
 
-To select explicit original-image-number ranges (1-based, inclusive, in the stable `discover_records` order), use. Every expert pair for each selected original image is included:
+将(原图 rgb，专家图 rgb，(专家图-原图) rgb)九通道输入一个 CNN 进行编码，这个 CNN 称为差异编码网络，得到 [128,W,H]，再对每个通道进行全局池化，得到 [128,1]，这个向量包含了该（原图，专家图）对的改动信息，称为变化信息向量。两个图对的变化信息向量若距离相近，则说明它们有着相似的改动，最相近的几个图对会被选为参考图对。
 
-```powershell
-python main.py --train-start 1 --train-end 16000 --val-start 16001 --val-end 18000
-```
+单个参考图对的处理
 
-All remaining pairs become the test split. The saved preview layout is: original, reference original, reference expert, output, target.
+选择到参考图对后，将当前图的原图输入一个 CNN 进行编码得到 [128,W1,H1]，此网络称为信息编码网络；再将(参考图，参考专家图，(参考专家图-参考图))共计九通道输入和分组时同一个差异编码网络中，得到 [128,W2,H2]。二者都插值到 [128,64,64]。
 
-Modes: `self_reference` (sanity check only), `random_reference`, `fixed_reference`, and `dynamic_attention`.
+这里实际上要做两次独立的交叉注意力运算：
+
+打分注意力（用来判断这个参考图对当前图有多合适）：把当前图自身也用差异编码网络编码一遍——即把（当前原图，当前答案图，答案图-原图）九通道也过一遍差异编码网络，得到当前图自己的变化信息特征，作为 Q；参考图对的差异编码结果作为 K 和 V。两者做交叉注意力，得到的注意力矩阵会被归约成一个标量，代表这个参考图对的可信度分数。
+迁移注意力（用来把参考图的改动手法搬到当前图上）：信息编码网络的输出（当前图的原图内容特征）作为 Q，差异编码网络对参考图对的编码输出作为 K 和 V——注意这里是"信息编码网络的结果作为 Q，差异编码网络的输出作为 K、V"，跟原文写反了。用 Q 去查询参考图每个位置的改动内容 K，得到注意力矩阵 [64×64,64×64]，代表原图关于参考图每处修改的关注程度：某处注意力高，意味着原图这个区域的修改应该类似参考图那个区域的修改，从而可以对齐两张图片中毫不相干却地位相同的区域，不依赖任何显式的语义或位置信息。
+
+把这个 [64×64,64×64] 的注意力矩阵和参考图对的 V 矩阵 [64×64,128] 相乘，得到 [64×64,128] 的迁移特征，这就是"从这一个参考图对搬运过来的改动信息"。
+
+多参考图对的处理
+
+由于每个当前图会同时选出多个（而不止一个）最相近的参考图对，上面"单个参考图对的处理"要对每一个参考图对都各自独立重复一遍，分别得到：
+
+每个参考图对对应的一个打分分数（标量，来自打分注意力）；
+每个参考图对对应的一份迁移特征 [64×64,128]（来自迁移注意力）。
+
+把所有参考图对的打分分数汇总起来，经过一个带温度的 softmax（温度随训练轮数退火，从大到小），转换成一组权重——分数越高的参考图对权重越大，权重之和为 1；训练初期温度高、权重分布较平滑，多个参考图对都会参与融合，训练后期温度低、权重会越来越集中到最可信的那一个参考图对上。
+
+再用这组权重，对所有参考图对各自的迁移特征 [64×64,128] 做加权求和，融合成一份最终的编辑特征 [64×64,128]。
+
+训练阶段不会选取任何包含当前图的图对作为参考图
+生成阶段
+
+融合后的编辑特征被 reshape 回 [128,64,64] 的空间网格，再送入生成网络（一个小型 CNN/U-Net），在网络内部插值放大到原图分辨率 [W1,H1]，输出 [3,W1,H1]，代表原图在每个像素点上的 RGB 变化值，叠加回原图后和答案图做 loss 并 step。
+
+由于分组任务和修图任务中使用的差异编码网络是同一个，模型在学习让输出像专家图的过程中，会同时学会如何提取真正代表"改动"的差异信息，这使得这个网络用于寻找参考图对的能力，即便没有直接的监督信号，也会随着主任务的训练越来越好。

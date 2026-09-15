@@ -19,33 +19,23 @@ class Trainer:
         raise ValueError(f"Unknown or unavailable split: {split}")
     @staticmethod
     def _source_id(dataset,index):return dataset.records[index]["id"].rsplit("_",1)[0]
-    def _candidate_indices(self,index,split,mode):
-        dataset=self._dataset(split)
-        if mode=="self_reference":return [index]
-        if mode=="dynamic_attention":
-            choices=self.references.get(split,{}).get(index)
-            if choices is None:raise RuntimeError(f"No dynamic references prepared for {split} sample {index}")
-            return choices
-        current_source=self._source_id(dataset,index)
-        candidates=[x for x in range(len(dataset)) if self._source_id(dataset,x)!=current_source]
-        if not candidates:raise RuntimeError(f"{split} needs at least two distinct original images for a non-self reference")
-        rng=np.random.default_rng(self.cfg.seed+index+len(dataset)*17)
-        if mode=="fixed_reference":return candidates[:self.cfg.num_reference]
-        return rng.choice(candidates,size=min(self.cfg.num_reference,len(candidates)),replace=False).tolist()
-    def _references(self,indices,split,mode):
-        source=self._dataset(self.reference_sources[split]) if mode=="dynamic_attention" else self._dataset(split)
+    def _candidate_indices(self,index,split):
+        choices=self.references.get(split,{}).get(index)
+        if choices is None:raise RuntimeError(f"No dynamic references prepared for {split} sample {index}")
+        return choices
+    def _references(self,indices,split):
+        source=self._dataset(self.reference_sources[split])
         refs_o=[];refs_e=[]
         for index in indices:
-            if mode=="self_reference" and split!="train": choices=[int(index)]
-            else: choices=self._candidate_indices(int(index),split,mode)
+            choices=self._candidate_indices(int(index),split)
             rows=[source.load(i)[:2] for i in choices]
             while len(rows)<self.cfg.num_reference:rows.append(rows[-1])
             refs_o.append(np.stack([x[0] for x in rows]));refs_e.append(np.stack([x[1] for x in rows]))
         return torch.from_numpy(np.stack(refs_o)).to(self.device),torch.from_numpy(np.stack(refs_e)).to(self.device)
-    def run_epoch(self,dataset,split,epoch,mode,train):
+    def run_epoch(self,dataset,split,epoch,train):
         self.model.train(train);values=[];psnrs=[];ssims=[]
         for batch in tqdm(self.loader(dataset,train),desc=f"{split} {epoch}",leave=False):
-            original=batch["original"].to(self.device);target=batch["expert"].to(self.device);refs_o,refs_e=self._references(batch["index"].tolist(),split,mode)
+            original=batch["original"].to(self.device);target=batch["expert"].to(self.device);refs_o,refs_e=self._references(batch["index"].tolist(),split)
             with torch.set_grad_enabled(train):
                 output,_,_=self.model(original,target,refs_o,refs_e,self.temperature);l1=F.l1_loss(output,target);ssim=ssim_per_image(output,target).mean();loss=l1+self.cfg.lambda_ssim*(1-ssim)+self.cfg.residual_weight*(output-original).abs().mean()
                 if train:self.optimizer.zero_grad(set_to_none=True);loss.backward();torch.nn.utils.clip_grad_norm_(self.model.parameters(),1.0);self.optimizer.step()

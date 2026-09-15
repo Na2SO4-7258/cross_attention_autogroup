@@ -11,7 +11,7 @@ from evaluator import evaluate,save_visualizations
 
 def arguments():
     parser=argparse.ArgumentParser(description="Latent reference learning for MIT-Adobe FiveK retouching")
-    parser.add_argument("--data-dir");parser.add_argument("--output-dir");parser.add_argument("--download-url");parser.add_argument("--epochs",type=int);parser.add_argument("--batch-size",type=int);parser.add_argument("--image-size",type=int);parser.add_argument("--mode",choices=["self_reference","random_reference","fixed_reference","dynamic_attention"],default="dynamic_attention");parser.add_argument("--num-reference",type=int);parser.add_argument("--num-workers",type=int);parser.add_argument("--group-update-interval",type=int);parser.add_argument("--attention-dim",type=int);parser.add_argument("--edit-dim",type=int);parser.add_argument("--cross-attention-heads",type=int);parser.add_argument("--attention-spatial-size",type=int);parser.add_argument("--train-start",type=int);parser.add_argument("--train-end",type=int);parser.add_argument("--val-start",type=int);parser.add_argument("--val-end",type=int);parser.add_argument("--resume");parser.add_argument("--evaluate-only",action="store_true");parser.add_argument("--visualize-val-each-epoch",action="store_true",default=None)
+    parser.add_argument("--data-dir");parser.add_argument("--output-dir");parser.add_argument("--download-url");parser.add_argument("--epochs",type=int);parser.add_argument("--batch-size",type=int);parser.add_argument("--image-size",type=int);parser.add_argument("--num-reference",type=int);parser.add_argument("--num-workers",type=int);parser.add_argument("--group-update-interval",type=int);parser.add_argument("--attention-dim",type=int);parser.add_argument("--edit-dim",type=int);parser.add_argument("--cross-attention-heads",type=int);parser.add_argument("--attention-spatial-size",type=int);parser.add_argument("--train-start",type=int);parser.add_argument("--train-end",type=int);parser.add_argument("--val-start",type=int);parser.add_argument("--val-end",type=int);parser.add_argument("--resume");parser.add_argument("--evaluate-only",action="store_true");parser.add_argument("--visualize-val-each-epoch",action="store_true",default=None)
     return parser.parse_args()
 
 def main():
@@ -29,21 +29,19 @@ def main():
         if best_path.exists():
             state=torch.load(best_path,map_location=cfg.device);model.load_state_dict(state["model_state"]);best=state.get("best_psnr",best);logging.getLogger("fivek").info("loaded best-PSNR model: %s (PSNR=%.3f)",best_path,best)
     if args.evaluate_only:
-        result=evaluate(model,test,trainer,args.mode,"test");log.info(result);return
+        result=evaluate(model,test,trainer,"test");log.info(result);return
     history=[]
     for epoch in range(start,cfg.num_epochs+1):
         trainer.temperature=max(cfg.min_temperature,cfg.temperature*(1-(epoch-1)/max(cfg.num_epochs,1)))
-        if args.mode=="dynamic_attention":
-            row={"epoch":epoch,"temperature":trainer.temperature}
-            if epoch==1 or epoch%cfg.group_update_interval==0:row["train_grouping"]=trainer.update_grouping(train,"train",epoch)
-        else: row={"epoch":epoch,"temperature":trainer.temperature}
-        train_metrics=trainer.run_epoch(train,"train",epoch,args.mode,True)
-        if args.mode=="dynamic_attention":row["val_grouping"]=trainer.update_grouping(val,"val",epoch)
-        val_metrics=trainer.run_epoch(val,"val",epoch,args.mode,False);row.update({"train":train_metrics,"val":val_metrics});
-        if cfg.visualize_val_each_epoch:save_visualizations(model,val,trainer,args.mode,f"val_epoch_{epoch:03d}")
-        if args.mode=="dynamic_attention":trainer.checkpoint(epoch,best,f"epoch_{epoch:03d}.pt")
+        row={"epoch":epoch,"temperature":trainer.temperature}
+        if epoch==1 or epoch%cfg.group_update_interval==0:row["train_grouping"]=trainer.update_grouping(train,"train",epoch)
+        train_metrics=trainer.run_epoch(train,"train",epoch,True)
+        row["val_grouping"]=trainer.update_grouping(val,"val",epoch)
+        val_metrics=trainer.run_epoch(val,"val",epoch,False);row.update({"train":train_metrics,"val":val_metrics});
+        if cfg.visualize_val_each_epoch:save_visualizations(model,val,trainer,f"val_epoch_{epoch:03d}")
+        trainer.checkpoint(epoch,best,f"epoch_{epoch:03d}.pt")
         if val_metrics["psnr"]>best:best=val_metrics["psnr"];trainer.checkpoint(epoch,best,"best_psnr.pt")
         trainer.checkpoint(epoch,best,"latest.pt");history.append(row);save_json(Path(cfg.paths()["logs"])/"history.json",history);save_training_curve(Path(cfg.paths()["logs"])/"training_loss.svg",history);log.info("epoch=%d loss=%.5f val_loss=%.5f psnr=%.3f ssim=%.4f lr=%.2e temp=%.3f",epoch,train_metrics["loss"],val_metrics["loss"],val_metrics["psnr"],val_metrics["ssim"],trainer.optimizer.param_groups[0]["lr"],trainer.temperature)
-    state=torch.load(Path(cfg.paths()["checkpoints"])/"best_psnr.pt",map_location=cfg.device);model.load_state_dict(state["model_state"]);result=evaluate(model,test,trainer,args.mode,"test");log.info("test=%s",result)
+    state=torch.load(Path(cfg.paths()["checkpoints"])/"best_psnr.pt",map_location=cfg.device);model.load_state_dict(state["model_state"]);result=evaluate(model,test,trainer,"test");log.info("test=%s",result)
 
 if __name__=="__main__":main()
