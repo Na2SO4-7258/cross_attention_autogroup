@@ -33,7 +33,7 @@ class Config:
     seed:int=1337  # 随机种子
     train_ratio:float=0.8  # 训练集比例
     val_ratio:float=0.1  # 验证集比例
-    download_url:str=""  # 数据集下载地址（为空时不下载）
+    download_url:str=""  # 留空使用公共 manifest 自动下载；不支持自定义压缩包地址
     max_visualizations:int=12  # 单次最多保存的预览图数
     visualize_val_each_epoch:bool=True  # 是否每个 epoch 保存验证集预览图
     # 原图按 discover_records 的稳定排序编号（从 1 开始、包含端点）；每张原图的全部专家组对都会被纳入。None 时沿用随机比例划分。

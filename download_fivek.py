@@ -1,7 +1,7 @@
 """MIT-Adobe FiveK retrieval and local compact-RGB preparation."""
 DOWNLOAD_MAX_SIDE=500
-DOWNLOAD_UP_TO=500
-DOWNLOAD_WORKERS=8
+DOWNLOAD_UP_TO=5000
+DOWNLOAD_WORKERS=20
 MANIFEST_URLS=(
     "https://huggingface.co/datasets/yuukicammy/MIT-Adobe-FiveK/resolve/main/training.json",
     "https://huggingface.co/datasets/yuukicammy/MIT-Adobe-FiveK/resolve/main/validation.json",
@@ -66,3 +66,16 @@ def ensure_fivek(data_dir,url=""):
     if failures:raise RuntimeError(f"FiveK download/preparation failed for {len(failures)} files. First failure: {failures[0]}")
     marker.write_text("prepared",encoding="utf-8")
     return root
+
+def main():
+    import argparse
+    from config import Config
+
+    cfg=Config()
+    parser=argparse.ArgumentParser(description="Download and prepare MIT-Adobe FiveK without starting training")
+    parser.add_argument("--data-dir",default=cfg.data_dir,help="Dataset directory (default: %(default)s)")
+    args=parser.parse_args()
+    root=ensure_fivek(args.data_dir,cfg.download_url)
+    print(f"FiveK dataset ready: {root.resolve()}")
+
+if __name__=="__main__":main()
