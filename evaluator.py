@@ -81,7 +81,7 @@ def _save_visualization(path,original,references,reference_experts,output,target
     for j,(reference,attention) in enumerate(zip(references,attentions)):
         groups=[] if attention is None else _attention_groups(attention,spatial_size)
         left=(canvas_width-pairs_width)//2+j*(2*tile_width+gap)
-        draw.text((left+4,row_top+4),f"Ref {j+1} | weight: {float(weights[j]):.6f} ({float(weights[j]):.2%})",fill="black")
+        draw.text((left+4,row_top+4),f"Ref {j+1} | selected share: {float(weights[j].mean()):.6f} ({float(weights[j].mean()):.2%})",fill="black")
         message=f"{len(groups)} groups | mean + {ATTENTION_STD_MULTIPLIER:g} std"
         if attention is None:message="No transfer attention (CNN fusion)"
         draw.text((left+4,row_top+22),message,fill="black")
@@ -93,14 +93,14 @@ def _save_visualization(path,original,references,reference_experts,output,target
     annotated.save(path)
 
 
-def _all_visual_attentions(model,original,references,reference_experts):
+def _all_visual_attentions(model,original,references,reference_experts,weights):
     if model.ablation_cnn_fusion:return [None]*references.shape[1]
     current_tokens=model.tokens(model.resize(model.a(original)))
     attentions=[]
     for j in range(references.shape[1]):
         reference_edit=model.edit_features(references[:,j],reference_experts[:,j])
         _,attention=model.cross_attention(current_tokens,model.tokens(reference_edit))
-        attentions.append(attention[0].detach().cpu())
+        attentions.append((attention[0]*weights[0,j,:,None]).detach().cpu())
         del attention
     return attentions
 
@@ -114,7 +114,7 @@ def save_visualizations(model,dataset,trainer,name,max_images=None,split="val"):
         original,expert,image_id=dataset.load(index);o=torch.from_numpy(original[None]).to(trainer.device);t=torch.from_numpy(expert[None]).to(trainer.device)
         ro,re=trainer._references([index],split)
         out,_,weights=model(o,t,ro,re,trainer.temperature);psnr=psnr_per_image(out,t).item();ssim=ssim_per_image(out,t).item()
-        attentions=_all_visual_attentions(model,o,ro,re)
+        attentions=_all_visual_attentions(model,o,ro,re,weights)
         _save_visualization(visual_dir/f"{image_id}.png",o[0],ro[0],re[0],out[0],t[0],psnr,ssim,attentions,model.attention_spatial_size,weights[0].detach().cpu())
 
     log.info("Saved %d visualizations to %s in %.1fs",limit,visual_dir,perf_counter()-started)
@@ -130,6 +130,6 @@ def evaluate(model,dataset,trainer,name):
         ro,re=trainer._references([index],name)
         out,_,weights=model(o,t,ro,re,trainer.temperature);metrics.append((psnr_per_image(out,t).item(),ssim_per_image(out,t).item()))
         if index<trainer.cfg.max_visualizations:
-            attentions=_all_visual_attentions(model,o,ro,re)
+            attentions=_all_visual_attentions(model,o,ro,re,weights)
             psnr,ssim=metrics[-1];_save_visualization(visual_dir/f"{image_id}.png",o[0],ro[0],re[0],out[0],t[0],psnr,ssim,attentions,model.attention_spatial_size,weights[0].detach().cpu())
     result={"split":name,"psnr":float(np.mean([m[0] for m in metrics])),"ssim":float(np.mean([m[1] for m in metrics])),"lpips":None,"count":len(metrics)};save_json(Path(trainer.cfg.paths()["root"])/f"{name}_evaluation.json",result);return result

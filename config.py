@@ -25,7 +25,7 @@ class Config:
     attention_dim:int=128  # 注意力特征维度
     edit_dim:int=64  # 编辑特征维度
     cross_attention_heads:int=2  # 交叉注意力头数
-    attention_spatial_size:int=32  # 注意力特征图空间尺寸
+    attention_spatial_size:int=64  # 注意力特征图空间尺寸
     enhancer_base_dim:int=64  # 增强器基础通道数
     enhancer_mid_dim:int=96  # 增强器中间通道数
 

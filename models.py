@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from attention import CrossAttention,ReferenceSimilarity,DynamicReferenceSelector
+from attention import CrossAttention
 
 class ConvBlock(nn.Module):
     def __init__(self,inside,outside,stride=1):
@@ -21,7 +21,7 @@ class EnhancementUNet(nn.Module):
 
 class LatentRetouchModel(nn.Module):
     def __init__(self,attention_dim=128,edit_dim=64,cross_attention_heads=1,attention_spatial_size=64,encoder_base_dim=32,encoder_mid_dim=64,enhancer_base_dim=64,enhancer_mid_dim=96,ablation_uniform_weight=False,ablation_cnn_fusion=False):
-        super().__init__();self.attention_spatial_size=attention_spatial_size;self.a=Encoder(3,edit_dim,encoder_base_dim,encoder_mid_dim);self.b=Encoder(9,edit_dim,encoder_base_dim,encoder_mid_dim);self.cross_attention=CrossAttention(edit_dim,attention_dim,cross_attention_heads);self.similarity=ReferenceSimilarity();self.selector=DynamicReferenceSelector();self.context_edit=nn.Linear(attention_dim,edit_dim);self.enhancer=EnhancementUNet(edit_dim,enhancer_base_dim,enhancer_mid_dim)
+        super().__init__();self.attention_spatial_size=attention_spatial_size;self.a=Encoder(3,edit_dim,encoder_base_dim,encoder_mid_dim);self.b=Encoder(9,edit_dim,encoder_base_dim,encoder_mid_dim);self.cross_attention=CrossAttention(edit_dim,attention_dim,cross_attention_heads);self.context_edit=nn.Linear(attention_dim,edit_dim);self.enhancer=EnhancementUNet(edit_dim,enhancer_base_dim,enhancer_mid_dim)
         self.ablation_uniform_weight=ablation_uniform_weight;self.ablation_cnn_fusion=ablation_cnn_fusion
         if ablation_cnn_fusion:self.cnn_fusion=Encoder(12,edit_dim,encoder_base_dim,encoder_mid_dim)
     @staticmethod
@@ -31,19 +31,35 @@ class LatentRetouchModel(nn.Module):
     def grouping_embedding(self,original,expert):
         """One [1, n] descriptor per (original, expert) pair from the existing 9-channel encoder."""
         return self.b(torch.cat([original,expert,expert-original],1)).mean(dim=(2,3))
-    def retouch_similarity_pair(self,current,current_expert,ref_original,ref_expert):
-        _,attention=self.cross_attention(self.tokens(self.edit_features(current,current_expert)),self.tokens(self.edit_features(ref_original,ref_expert)));return self.similarity(attention)
     def transfer_pair(self,current,reference_edit):
         context,_=self.cross_attention(self.tokens(self.resize(self.a(current))),self.tokens(reference_edit));return self.context_edit(context)
-    def forward(self,current,current_expert,ref_originals,ref_experts,temperature):
-        batch,count=ref_originals.shape[:2];scores=[];transferred=[]
+
+    def forward(self,current,current_expert,ref_originals,ref_experts,temperature=None):
+        """Return output, per-position scores and reference masks [B, R, S*S].
+
+        current_expert and temperature are retained for caller compatibility;
+        neither participates in spatial reference selection or enhancement.
+        """
+        batch,count=ref_originals.shape[:2]
         if count<1:raise ValueError("At least one reference is required")
-        if not self.ablation_uniform_weight:current_edit=self.edit_features(current,current_expert)
+        current_tokens=self.tokens(self.resize(self.a(current)))
+        scores=[];transferred=[]
         for j in range(count):
-            if not self.ablation_uniform_weight or not self.ablation_cnn_fusion:reference_edit=self.edit_features(ref_originals[:,j],ref_experts[:,j])
-            if not self.ablation_uniform_weight:
-                _,attention=self.cross_attention(self.tokens(current_edit),self.tokens(reference_edit));scores.append(self.similarity(attention))
+            reference_edit=self.edit_features(ref_originals[:,j],ref_experts[:,j])
+            context,_,score=self.cross_attention(current_tokens,self.tokens(reference_edit),return_scores=True)
+            scores.append(score)
             if self.ablation_cnn_fusion:
-                fused=torch.cat([current,ref_originals[:,j],ref_experts[:,j],ref_experts[:,j]-ref_originals[:,j]],1);transferred.append(self.tokens(self.resize(self.cnn_fusion(fused))))
-            else:transferred.append(self.transfer_pair(current,reference_edit))
-        scores=current.new_zeros((batch,count)) if self.ablation_uniform_weight else torch.stack(scores,1);weights=torch.full_like(scores,1/count) if self.ablation_uniform_weight else self.selector(scores,temperature);edit=sum(weights[:,j,None,None]*transferred[j] for j in range(count));edit=edit.transpose(1,2).reshape(batch,-1,self.attention_spatial_size,self.attention_spatial_size);return self.enhancer(current,edit),scores,weights
+                fused=torch.cat([current,ref_originals[:,j],ref_experts[:,j],ref_experts[:,j]-ref_originals[:,j]],1)
+                transferred.append(self.tokens(self.resize(self.cnn_fusion(fused))))
+            else:
+                transferred.append(self.context_edit(context))
+        scores=torch.stack(scores,dim=1)
+        if self.ablation_uniform_weight:
+            weights=torch.full_like(scores,1/count)
+        else:
+            # argmax uses the first reference when scores tie.
+            selected=scores.argmax(dim=1)
+            weights=F.one_hot(selected,num_classes=count).permute(0,2,1).to(scores.dtype)
+        edit=(torch.stack(transferred,dim=1)*weights.unsqueeze(-1)).sum(dim=1)
+        edit=edit.transpose(1,2).reshape(batch,-1,self.attention_spatial_size,self.attention_spatial_size)
+        return self.enhancer(current,edit),scores,weights
