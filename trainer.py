@@ -42,10 +42,22 @@ class Trainer:
             values.append(loss.item());psnrs.extend(psnr_per_image(output.detach(),target).cpu().tolist());ssims.extend(ssim_per_image(output.detach(),target).cpu().tolist())
         return {"loss":float(np.mean(values)),"psnr":float(np.mean(psnrs)),"ssim":float(np.mean(ssims))}
     @torch.no_grad()
-    def update_grouping(self,dataset,split,epoch,candidate_dataset=None,candidate_split=None):
+    def update_grouping(self,dataset,split,epoch,candidate_dataset=None,candidate_split=None,save_results=True):
         """Choose references for every pair; candidates may come from another split."""
         candidate_dataset=dataset if candidate_dataset is None else candidate_dataset;candidate_split=split if candidate_split is None else candidate_split
         if not len(candidate_dataset):raise RuntimeError(f"{candidate_split} has no reference pairs")
+        if self.cfg.num_reference<1:raise ValueError("num_reference must be positive")
+        if self.cfg.ablation_random_reference:
+            payload={};references={}
+            for index,record in enumerate(dataset.records):
+                candidates=[j for j in range(len(candidate_dataset)) if self._source_id(candidate_dataset,j)!=self._source_id(dataset,index)]
+                if not candidates:raise RuntimeError(f"No eligible references for {split} sample {record['id']}")
+                choices=np.random.choice(candidates,size=min(self.cfg.num_reference,len(candidates)),replace=False).tolist();references[index]=choices;payload[record["id"]]=[[candidate_dataset.records[j]["id"],None] for j in choices]
+            previous=self.last_top[split];self.last_top[split]=payload;self.references[split]=references;self.reference_sources[split]=candidate_split
+            info={"selection":"random","average_distance":None,"grouping_stability":grouping_stability(previous,payload),"example":next(iter(payload.items()),None)}
+            if save_results:
+                folder=Path(self.cfg.paths()["similarity"]);save_json(folder/f"{split}_top_reference_epoch_{epoch:03d}.json",payload);save_json(folder/f"{split}_grouping_epoch_{epoch:03d}.json",info)
+            return info
         self.model.eval();indices=list(range(len(dataset)));candidate_indices=list(range(len(candidate_dataset)));ids=[dataset.records[i]["id"] for i in indices];candidate_ids=[candidate_dataset.records[i]["id"] for i in candidate_indices]
         def embeddings(source,source_indices,label):
             vectors=[]
@@ -66,7 +78,10 @@ class Trainer:
         lookup={image_id:index for index,image_id in enumerate(candidate_ids)};self.references[split]={};self.reference_sources[split]=candidate_split
         for source_idx,record in enumerate(dataset.records):
             self.references[split][source_idx]=[lookup[v[0]] for v in payload[record["id"]]]
-        np.save(Path(self.cfg.paths()["similarity"])/f"{split}_similarity_epoch_{epoch:03d}.npy",matrix);save_json(Path(self.cfg.paths()["similarity"])/f"{split}_top_reference_epoch_{epoch:03d}.json",payload)
-        stability=grouping_stability(previous,payload);info={"average_distance":float(matrix[np.isfinite(matrix)].mean()),"grouping_stability":stability,"example":next(iter(payload.items()))};save_json(Path(self.cfg.paths()["similarity"])/f"{split}_grouping_epoch_{epoch:03d}.json",info);return info
+        if save_results:
+            np.save(Path(self.cfg.paths()["similarity"])/f"{split}_similarity_epoch_{epoch:03d}.npy",matrix);save_json(Path(self.cfg.paths()["similarity"])/f"{split}_top_reference_epoch_{epoch:03d}.json",payload)
+        stability=grouping_stability(previous,payload);info={"average_distance":float(matrix[np.isfinite(matrix)].mean()),"grouping_stability":stability,"example":next(iter(payload.items()))}
+        if save_results:save_json(Path(self.cfg.paths()["similarity"])/f"{split}_grouping_epoch_{epoch:03d}.json",info)
+        return info
     def checkpoint(self,epoch,best,tag):
         state={"model_state":self.model.state_dict(),"optimizer_state":self.optimizer.state_dict(),"epoch":epoch,"best_psnr":best,"temperature":self.temperature,"references":self.references,"reference_sources":self.reference_sources,"config":self.cfg.to_dict()};torch.save(state,Path(self.cfg.paths()["checkpoints"])/tag)

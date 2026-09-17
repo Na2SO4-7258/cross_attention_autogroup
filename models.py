@@ -20,8 +20,10 @@ class EnhancementUNet(nn.Module):
         edit=F.interpolate(edit,size=original.shape[-2:],mode="bilinear",align_corners=False);skip=self.input(torch.cat([original,edit],1));x=self.down(skip);x=self.mid(x);x=F.interpolate(x,size=skip.shape[-2:],mode="bilinear",align_corners=False);x=self.up(x)+skip;return (original+self.output(x).tanh()*0.25).clamp(0,1)
 
 class LatentRetouchModel(nn.Module):
-    def __init__(self,attention_dim=128,edit_dim=64,cross_attention_heads=1,attention_spatial_size=64,encoder_base_dim=32,encoder_mid_dim=64,enhancer_base_dim=64,enhancer_mid_dim=96):
+    def __init__(self,attention_dim=128,edit_dim=64,cross_attention_heads=1,attention_spatial_size=64,encoder_base_dim=32,encoder_mid_dim=64,enhancer_base_dim=64,enhancer_mid_dim=96,ablation_uniform_weight=False,ablation_cnn_fusion=False):
         super().__init__();self.attention_spatial_size=attention_spatial_size;self.a=Encoder(3,edit_dim,encoder_base_dim,encoder_mid_dim);self.b=Encoder(9,edit_dim,encoder_base_dim,encoder_mid_dim);self.cross_attention=CrossAttention(edit_dim,attention_dim,cross_attention_heads);self.similarity=ReferenceSimilarity();self.selector=DynamicReferenceSelector();self.context_edit=nn.Linear(attention_dim,edit_dim);self.enhancer=EnhancementUNet(edit_dim,enhancer_base_dim,enhancer_mid_dim)
+        self.ablation_uniform_weight=ablation_uniform_weight;self.ablation_cnn_fusion=ablation_cnn_fusion
+        if ablation_cnn_fusion:self.cnn_fusion=Encoder(12,edit_dim,encoder_base_dim,encoder_mid_dim)
     @staticmethod
     def tokens(feature):return feature.flatten(2).transpose(1,2)
     def resize(self,feature):return F.interpolate(feature,size=(self.attention_spatial_size,self.attention_spatial_size),mode="bilinear",align_corners=False)
@@ -34,7 +36,14 @@ class LatentRetouchModel(nn.Module):
     def transfer_pair(self,current,reference_edit):
         context,_=self.cross_attention(self.tokens(self.resize(self.a(current))),self.tokens(reference_edit));return self.context_edit(context)
     def forward(self,current,current_expert,ref_originals,ref_experts,temperature):
-        batch,count=ref_originals.shape[:2];current_edit=self.edit_features(current,current_expert);scores=[];transferred=[]
+        batch,count=ref_originals.shape[:2];scores=[];transferred=[]
+        if count<1:raise ValueError("At least one reference is required")
+        if not self.ablation_uniform_weight:current_edit=self.edit_features(current,current_expert)
         for j in range(count):
-            reference_edit=self.edit_features(ref_originals[:,j],ref_experts[:,j]);_,attention=self.cross_attention(self.tokens(current_edit),self.tokens(reference_edit));scores.append(self.similarity(attention));transferred.append(self.transfer_pair(current,reference_edit))
-        scores=torch.stack(scores,1);weights=self.selector(scores,temperature);edit=sum(weights[:,j,None,None]*transferred[j] for j in range(count));edit=edit.transpose(1,2).reshape(batch,-1,self.attention_spatial_size,self.attention_spatial_size);return self.enhancer(current,edit),scores,weights
+            if not self.ablation_uniform_weight or not self.ablation_cnn_fusion:reference_edit=self.edit_features(ref_originals[:,j],ref_experts[:,j])
+            if not self.ablation_uniform_weight:
+                _,attention=self.cross_attention(self.tokens(current_edit),self.tokens(reference_edit));scores.append(self.similarity(attention))
+            if self.ablation_cnn_fusion:
+                fused=torch.cat([current,ref_originals[:,j],ref_experts[:,j],ref_experts[:,j]-ref_originals[:,j]],1);transferred.append(self.tokens(self.resize(self.cnn_fusion(fused))))
+            else:transferred.append(self.transfer_pair(current,reference_edit))
+        scores=current.new_zeros((batch,count)) if self.ablation_uniform_weight else torch.stack(scores,1);weights=torch.full_like(scores,1/count) if self.ablation_uniform_weight else self.selector(scores,temperature);edit=sum(weights[:,j,None,None]*transferred[j] for j in range(count));edit=edit.transpose(1,2).reshape(batch,-1,self.attention_spatial_size,self.attention_spatial_size);return self.enhancer(current,edit),scores,weights
