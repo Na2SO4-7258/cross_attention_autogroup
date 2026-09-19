@@ -28,9 +28,10 @@ def main():
         best_path=Path(cfg.paths()["checkpoints"])/"best_psnr.pt"
         if best_path.exists():
             state=torch.load(best_path,map_location=cfg.device)
-            if "cross_attention.v.weight" in state["model_state"] or state["model_state"]["enhancer.output.weight"].shape!=model.enhancer.output.weight.shape:
-                if args.evaluate_only:raise RuntimeError("Old residual checkpoint is incompatible; train the new architecture before evaluation")
-                log.info("Skipping old residual-model checkpoint %s; training the new architecture from scratch",best_path)
+            expected=model.state_dict();saved=state["model_state"]
+            if saved.keys()!=expected.keys() or any(saved[key].shape!=value.shape for key,value in expected.items()):
+                if args.evaluate_only:raise RuntimeError("Checkpoint architecture is incompatible; use a matching residual-model checkpoint")
+                log.info("Skipping incompatible checkpoint %s; training the residual model from scratch",best_path)
             else:
                 model.load_state_dict(state["model_state"]);best=state.get("best_psnr",best);log.info("loaded best-PSNR model: %s (PSNR=%.3f)",best_path,best)
     if args.evaluate_only:

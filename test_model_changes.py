@@ -36,14 +36,19 @@ class ChangesTest(unittest.TestCase):
         k=torch.randn(2,4,3,requires_grad=True)
         v=torch.randn(2,3,4,5,requires_grad=True)
         context,a=attn(q,k,values=v,query_size=(2,2),key_size=(2,2))
-        keys=F.interpolate(a.reshape(2,4,2,2),size=(4,5),mode='bilinear',align_corners=False).flatten(2)
+        projected_q=attn.q(q).reshape(2,4,2,4).transpose(1,2)
+        projected_k=attn.k(k).reshape(2,4,2,4).transpose(1,2)
+        heads=(projected_q@projected_k.transpose(-1,-2)*attn.scale).abs().softmax(-1)
+        torch.testing.assert_close(a,heads.mean(1))
+        keys=F.interpolate(heads.reshape(4,4,2,2),size=(4,5),mode='bilinear',align_corners=False).flatten(2)
         keys=keys/keys.sum(-1,keepdim=True)
-        full=F.interpolate(keys.transpose(1,2).reshape(2,20,2,2),size=(3,4),mode='bilinear',align_corners=False).flatten(2).transpose(1,2)
-        expected=(full@v.flatten(2).transpose(1,2)).transpose(1,2).reshape(2,3,3,4)
+        full=F.interpolate(keys.transpose(1,2).reshape(4,20,2,2),size=(3,4),mode='bilinear',align_corners=False).flatten(2).transpose(1,2).reshape(2,2,12,20)
+        projected_v=attn.v(v.flatten(2).transpose(1,2)).reshape(2,20,2,4).transpose(1,2)
+        expected=attn.out((full@projected_v).transpose(1,2).reshape(2,12,8)).transpose(1,2).reshape(2,8,3,4)
         actual=F.interpolate(context,size=(3,4),mode='bilinear',align_corners=False)
         torch.testing.assert_close(actual,expected)
         actual.square().mean().backward()
-        for value in (q,k,v):
+        for value in (q,k,v,attn.v.weight,attn.out.weight):
             self.assertTrue(torch.isfinite(value.grad).all())
             self.assertGreater(value.grad.abs().sum().item(),0)
 
@@ -63,33 +68,28 @@ class ChangesTest(unittest.TestCase):
                 self.assertIsNone(net.a.a.net[0].weight.grad)
             else:
                 self.assertGreater(net.a.a.net[0].weight.grad.abs().sum().item(),0)
+                for layer in (net.cross_attention.v,net.cross_attention.out,net.context_edit):
+                    self.assertGreater(layer.weight.grad.abs().sum().item(),0)
             encoder=net.cnn_fusion if options.get("ablation_cnn_fusion") else net.b
             self.assertGreater(encoder.a.net[0].weight.grad.abs().sum().item(),0)
         net=model()
         with torch.no_grad():
             for param in net.b.parameters():param.zero_()
+            net.cross_attention.v.bias.zero_();net.cross_attention.out.bias.zero_();net.context_edit.bias.zero_()
         captured=[]
         net.enhancer.register_forward_pre_hook(lambda module,args:captured.append(args[1]))
         net(x,None,refs,refs)
         torch.testing.assert_close(captured[0],torch.zeros_like(captured[0]))
 
-    def test_global_affine_rgb(self):
+    def test_residual_rgb(self):
         net=EnhancementUNet(8,8,8)
-        x=torch.rand(2,3,16,16)
-        edit=torch.rand(2,8,4,4)
         with torch.no_grad():
-            net.output.weight.zero_()
-            net.output.bias.copy_(torch.tensor([1.,1.,1.,0.,0.,0.]))
+            net.output.weight.zero_();net.output.bias.zero_()
+        x=torch.rand(1,3,16,16)
+        edit=torch.rand(1,8,4,4)
         torch.testing.assert_close(net(x,edit),x)
-        with torch.no_grad():
-            net.output.bias.copy_(torch.tensor([1.2,0.8,1.1,0.1,-0.1,0.05]))
-        gain,offset=net.mapping_parameters(x,edit)
-        self.assertEqual(gain.shape,(2,3,1,1))
-        self.assertEqual(offset.shape,(2,3,1,1))
-        expected=x*torch.tensor([1.2,0.8,1.1])[None,:,None,None]+torch.tensor([0.1,-0.1,0.05])[None,:,None,None]
-        torch.testing.assert_close(net(x,edit),expected.clamp(0,1))
-        net(x,edit).mean().backward()
-        self.assertGreater(net.output.weight.grad.abs().sum().item(),0)
+        with torch.no_grad():net.output.bias.fill_(1.0)
+        torch.testing.assert_close(net(x,edit),(x+torch.tanh(torch.tensor(1.0))*0.25).clamp(0,1))
 
     def test_chunks_refresh_only_current_queries(self):
         data=MemoryDataset(203)
