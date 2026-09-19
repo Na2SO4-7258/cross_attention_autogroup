@@ -60,36 +60,98 @@ def _visual_attention(model,original,reference,reference_expert):
     # CNN fusion has no spatial transfer attention to visualize.
     if model.ablation_cnn_fusion:return None
     reference_edit=model.edit_features(reference,reference_expert)
-    _,attention=model.cross_attention(model.tokens(model.resize(model.a(original))),model.tokens(reference_edit))
+    _,attention=model.cross_attention(model.tokens(model.resize(model.a(original))),model.tokens(model.resize(reference_edit)))
     return attention[0]
 
+def _pixel_change_maps(original,output):
+    """Output minus input: RGB luma, HSV saturation, normalized R-B warmth.
+
+    Warmth is a relative color-balance proxy, not a Kelvin temperature estimate.
+    """
+    def measures(tile):
+        rgb=tile.detach().float().cpu().numpy().clip(0,1)
+        high=rgb.max(axis=0);low=rgb.min(axis=0)
+        brightness=0.2126*rgb[0]+0.7152*rgb[1]+0.0722*rgb[2]
+        saturation=np.divide(high-low,high,out=np.zeros_like(high),where=high>1e-6)
+        total=rgb.sum(axis=0)
+        warmth=np.divide(rgb[0]-rgb[2],total,out=np.zeros_like(total),where=total>1e-6)
+        return brightness,saturation,warmth
+    before=measures(original);after=measures(output)
+    return tuple(new-old for old,new in zip(before,after))
+
+
+def _change_heatmap(change,limit=None):
+    """Symmetric scale, optionally shared: blue negative, white zero, red positive."""
+    limit=float(np.abs(change).max()) if limit is None else float(limit)
+    signed=np.clip(change/limit,-1,1) if limit>1e-8 else np.zeros_like(change)
+    rgb=np.ones((*change.shape,3),dtype=np.float32)
+    rgb[...,0]-=np.maximum(-signed,0)
+    rgb[...,1]-=np.abs(signed)
+    rgb[...,2]-=np.maximum(signed,0)
+    return Image.fromarray(np.rint(rgb*255).astype(np.uint8)),limit
+
+
 def _save_visualization(path,original,references,reference_experts,output,target,psnr,ssim,attentions,spatial_size,weights):
-    tiles=[original,references[0],reference_experts[0],output,target]
-    panel=torch.cat([tile.detach().cpu() for tile in tiles],2).permute(1,2,0).numpy()
-    image=Image.fromarray((panel.clip(0,1)*255).astype(np.uint8))
-    count=len(references);tile_width=original.shape[2];gap=16
-    header_height=46;attention_header=64
-    pairs_width=2*tile_width*count+gap*(count-1)
-    canvas_width=max(image.width,pairs_width)
-    annotated=Image.new("RGB",(canvas_width,2*image.height+header_height+attention_header),"white")
-    first_left=(canvas_width-image.width)//2
-    annotated.paste(image,(first_left,header_height));draw=ImageDraw.Draw(annotated)
-    draw.text((first_left+6,4),f"PSNR: {psnr:.3f}  SSIM: {ssim:.4f}",fill="black")
-    for i,label in enumerate(["original","reference 1","reference expert 1","output","target"]):
-        draw.text((first_left+i*tile_width+4,22),label,fill="black")
-    row_top=image.height+header_height
-    for j,(reference,attention) in enumerate(zip(references,attentions)):
+    count=len(references)
+    tile_height,tile_width=original.shape[-2:]
+    gap=12;margin=12;header=54;footer=58
+    # Keep labels readable even for small training/test images.
+    column_width=max(tile_width,240)
+    row_height=header+tile_height+gap
+    canvas_width=2*margin+3*column_width+2*gap
+    canvas_height=2*margin+(count+3)*row_height+2*footer
+    annotated=Image.new("RGB",(canvas_width,canvas_height),"white")
+    draw=ImageDraw.Draw(annotated)
+
+    def left(column):return margin+column*(column_width+gap)
+    def paste(tile,column,top):
+        annotated.paste(tile,(left(column)+(column_width-tile.width)//2,top+header))
+    def plain(tile):
+        pixels=tile.detach().float().cpu().permute(1,2,0).numpy().clip(0,1)
+        return Image.fromarray(np.rint(pixels*255).astype(np.uint8))
+
+    top=margin
+    draw.text((margin,top),f"PSNR: {psnr:.3f}  SSIM: {ssim:.4f}",fill="black")
+    for column,(tile,label) in enumerate(((original,"Original"),(output,"Output"),(target,"Ground truth"))):
+        draw.text((left(column),top+28),label,fill="black")
+        paste(plain(tile),column,top)
+
+    for j in range(count):
+        top=margin+(j+1)*row_height
+        attention=attentions[j]
         groups=[] if attention is None else _attention_groups(attention,spatial_size)
-        left=(canvas_width-pairs_width)//2+j*(2*tile_width+gap)
-        draw.text((left+4,row_top+4),f"Ref {j+1} | selected share: {float(weights[j].mean()):.6f} ({float(weights[j].mean()):.2%})",fill="black")
-        message=f"{len(groups)} groups | mean + {ATTENTION_STD_MULTIPLIER:g} std"
-        if attention is None:message="No transfer attention (CNN fusion)"
-        draw.text((left+4,row_top+22),message,fill="black")
-        for side,(tile,label) in enumerate(((original,"original attention"),(reference,f"reference {j+1} attention"))):
-            tile_left=left+side*tile_width
-            draw.text((tile_left+4,row_top+42),label,fill="black")
-            marked=_mark_attention_regions(tile,groups,side,spatial_size)
-            annotated.paste(marked,(tile_left,row_top+attention_header))
+        message="No transfer attention (CNN fusion)" if attention is None else f"{len(groups)} attention groups (matching colors / IDs)"
+        draw.text((margin,top),f"Ref {j+1} | selected: {float(weights[j].mean()):.2%} | {message}",fill="black")
+        tiles=((original,"Original attention",0),
+               (references[j],f"Reference {j+1} original attention",1),
+               (reference_experts[j],f"Reference {j+1} expert attention",1))
+        for column,(tile,label,side) in enumerate(tiles):
+            draw.text((left(column),top+28),label,fill="black")
+            paste(_mark_attention_regions(tile,groups,side,spatial_size),column,top)
+
+    predicted_changes=_pixel_change_maps(original,output)
+    target_changes=_pixel_change_maps(original,target)
+    limits=[max(float(np.abs(predicted).max()),float(np.abs(actual).max()))
+            for predicted,actual in zip(predicted_changes,target_changes)]
+    labels=("Brightness (RGB luma)","Saturation (HSV S)","Temperature (warmth proxy)")
+    for row,(name,changes) in enumerate((("Output",predicted_changes),("Ground truth",target_changes))):
+        top=margin+(count+1)*row_height+row*(row_height+footer)
+        draw.text((margin,top),f"{name} - original | blue = decrease, white = zero, red = increase",fill="black")
+        for column,(label,change) in enumerate(zip(labels,changes)):
+            draw.text((left(column),top+28),label,fill="black")
+            heatmap,limit=_change_heatmap(change,limits[column])
+            paste(heatmap,column,top)
+            bar_top=top+header+tile_height+8
+            ramp=np.tile(np.linspace(-1,1,column_width,dtype=np.float32),(12,1))
+            bar,_=_change_heatmap(ramp)
+            annotated.paste(bar,(left(column),bar_top))
+            draw.text((left(column),bar_top+15),f"-{limit:.4f}",fill="black")
+            draw.text((left(column)+column_width//2-3,bar_top+15),"0",fill="black")
+            text=f"+{limit:.4f}"
+            width=draw.textbbox((0,0),text)[2]
+            draw.text((left(column)+column_width-width,bar_top+15),text,fill="black")
+            note="Blue: cooler / Red: warmer" if column==2 else "Shared output / target scale"
+            draw.text((left(column),bar_top+32),note,fill="black")
     annotated.save(path)
 
 
@@ -99,7 +161,7 @@ def _all_visual_attentions(model,original,references,reference_experts,weights):
     attentions=[]
     for j in range(references.shape[1]):
         reference_edit=model.edit_features(references[:,j],reference_experts[:,j])
-        _,attention=model.cross_attention(current_tokens,model.tokens(reference_edit))
+        _,attention=model.cross_attention(current_tokens,model.tokens(model.resize(reference_edit)))
         attentions.append((attention[0]*weights[0,j,:,None]).detach().cpu())
         del attention
     return attentions
